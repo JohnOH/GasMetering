@@ -5,10 +5,10 @@
 //
 // Note that this "sketch" is not for the ATmega328 but for the ATtiny84/85, 
 // see http://jeelabs.org/2011/10/10/ac-current-detection-works/
-static byte myNodeID= 16;       // node ID used for this unit
 #include <JeeLib.h>
 #include <avr/sleep.h>
 #include <avr/interrupt.h>  
+#include <avr/wdt.h>
 #define AIO1 7 // d7
 #define DIO1 8 // d8
 #define AIO2 9 // d9
@@ -24,6 +24,7 @@ unsigned long then = 0;
 unsigned int TimeOut = 3600; // 6 hours    // 416 //    // Initial timeout if interrupts don't happen approx 1 hour
 volatile unsigned long WaitTime; // stored time of interrupt
 volatile unsigned long previous; // millis value at previous interrupt
+static byte myNodeID;
 //
 /////////////////////////////////////////////////////////////////////////////////////
 struct payload{                                                                    //
@@ -37,13 +38,19 @@ byte vcc;         //getVcc 1.0V = 0, 1.8V = 40, 3.3V = 115, 5.0V = 200, 6.0V = 2
 /////////////////////////////////////////////////////////////////////////////////////
 boolean PowerOK = true;
 volatile boolean MeterChanged = false;
+volatile boolean WDTwake = false;
 boolean LED1 = true;
 boolean LED2 = true;
 volatile int pulse = 1;          // Always assume meter increments at startup
 unsigned int ms = 65535;         // Actually 256ms per unit with Prescaler at maximum.
 unsigned int RestTime = 60000;   // 60 seconds
 //
-ISR(WDT_vect) { Sleepy::watchdogEvent(); }
+//Watchdog timeout ISR
+ISR (WDT_vect) {
+  pseudoTime = pseudoTime + 8000 - 22;    /* 8 seconds between watchdog interrupts */ - /* Fine Tuning */
+  bitSet (WDTCSR, WDIE);
+  WDTwake = true;
+  }
 //
 ISR (PCINT0_vect) { 
 //  LED1 = !LED1;
@@ -89,6 +96,21 @@ unsigned int getAvrTemp(void)
   bitSet(PRR, PRADC); // power down the ADC
   return (((high << 8) | low) - 273);  // An approximation to centigrade
  }
+//
+// Initialize watchdog
+void WDT_Init(void)
+{
+//disable interrupts
+cli();
+//reset watchdog
+//wdt_reset();
+//set up WDT interrupt
+WDTCSR = (1<<WDCE)|(1<<WDE);
+//Start watchdog timer with 8s prescaller
+WDTCSR = (1<<WDIE)|(1<<WDE)|(1<<WDP0)|(1<<WDP3);
+//Enable global interrupts
+sei();
+}
 //
 unsigned int setVcc(void)
  {
@@ -142,7 +164,7 @@ void setup () {
 //  pinMode(AIO1, INPUT);
 //  pinMode(AIO2, INPUT);
 //  sei();                // Just to be sure
-  rf12_initialize(myNodeID, RF12_868MHZ, 212);
+  myNodeID = rf12_config();        // Assume eeprom is set up
   rf12_control(0xC040); // set low-battery level to 2.2V i.s.o. 3.1V
   rf12_sleep(RF12_SLEEP);
   setVcc();               // Set up for a Vcc read
@@ -158,7 +180,6 @@ void setup () {
 void loop () {
       while (ms < TimeOut)   // Note ms is not an accurate millsecond since using Prescaler Max & Min values. 220=min 13320=hour
       {
-        rf12_setWatchdog(RestTime); // after ~60 s
         setPrescaler(8); // div 256, i.e. 1 or 8 MHz div 256 (8) = 32kHz // Sleep at slow speed
         set_sleep_mode(SLEEP_MODE_PWR_DOWN);
         sleep_enable();                         // Expecting to sleep for 8 seconds or any other interrupt!
@@ -170,15 +191,12 @@ void loop () {
         setPrescaler(0); // Full speed
         pseudoTime = pseudoTime + (now - then); // Adjust time as best we can //
         then = now;
-        if (rf12_watchdogFired()) 
-        {
-          pseudoTime = pseudoTime + (RestTime);    // 60 seconds between watchdog interrupts // - // Fine Tuning ? //
-          rf12_setWatchdog(RestTime); // 10 seconds
-          ms++;
-//          LED2 = !LED2;
-//          digitalWrite(AIO2, LED2);   
-        }
 
+        if (WDTwake) 
+        {
+          ms++;
+          WDTwake = !WDTwake; 
+        }
         if (MeterChanged && NextTime < pseudoTime)      // Has meter changed? // Impose a minimum delay between transmissions
           {
 //             LED1 = !LED1;
